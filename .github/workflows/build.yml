@@ -1,0 +1,32 @@
+name: Build ModMan
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Publish self-contained Windows x64 EXE
+        run: dotnet publish src/ModMan/ModMan.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package/ModulesManager/preset | Out-Null
+          New-Item -ItemType Directory -Force -Path package/ModulesManager/Backups | Out-Null
+          Copy-Item publish/ModMan.exe package/ModulesManager/ModMan.exe
+          Set-Content -Path package/ModulesManager/ModManSettings.json -Value '{ "gameDirectory": "..", "launchExe": "th123.exe", "jsonFileName": "ModLoaderSettings.json", "iniFileName": "SWRSToys.ini", "backupEnabled": true }' -Encoding UTF8
+          Compress-Archive -Path package/ModulesManager -DestinationPath ModMan-Windows-x64.zip -Force
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ModMan-Windows-x64
+          path: ModMan-Windows-x64.zip
