@@ -10,6 +10,10 @@ internal sealed class AppSettings
     public string IniFileName { get; set; } = "SWRSToys.ini";
     public string SelectedPreset { get; set; } = "";
     public bool BackupEnabled { get; set; } = true;
+    public List<string> PresetOrder { get; set; } = new();
+    public string TrayClickPreset { get; set; } = "";
+    // "Single" or "Double". A single click is delayed until Windows' double-click interval has elapsed.
+    public string TrayClickMode { get; set; } = "Single";
 }
 
 internal sealed record ModuleEntry(string Key, string DisplayName, bool Enabled);

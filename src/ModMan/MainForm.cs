@@ -16,6 +16,8 @@ internal sealed class MainForm : Form
     private readonly ListBox presetList = new() { IntegralHeight = false };
     private readonly CheckedListBox moduleList = new() { CheckOnClick = true, IntegralHeight = false };
     private readonly FlowLayoutPanel homePresetPanel = new() { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+    private readonly ComboBox trayPresetBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
+    private readonly ComboBox trayClickModeBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
     private readonly Label statusLabel = new() { AutoSize = true, ForeColor = Color.DimGray };
     private readonly Panel homePanel = new() { Dock = DockStyle.Fill };
     private readonly Panel editorPanel = new() { Dock = DockStyle.Fill, Visible = false };
@@ -23,8 +25,12 @@ internal sealed class MainForm : Form
     private List<ModuleEntry> currentModules = new();
     private bool loading;
     private bool allowExit;
+    private bool loadingTrayQuickSettings;
+    private bool launchInProgress;
+    private long ignoreLeftClickUntilTick;
     private readonly NotifyIcon trayIcon = new();
     private readonly ContextMenuStrip trayMenu = new();
+    private readonly System.Windows.Forms.Timer trayClickTimer = new();
 
     public MainForm()
     {
@@ -48,6 +54,8 @@ internal sealed class MainForm : Form
         FormClosing += HandleFormClosing;
         FormClosed += (_, _) =>
         {
+            trayClickTimer.Stop();
+            trayClickTimer.Dispose();
             trayIcon.Visible = false;
             trayIcon.Dispose();
             trayMenu.Dispose();
@@ -64,10 +72,37 @@ internal sealed class MainForm : Form
         trayMenu.Items.Add("終了", null, (_, _) => ExitApplication());
 
         trayIcon.Icon = SystemIcons.Application;
-        trayIcon.Text = "ModMan";
+        trayIcon.Text = "ModMan - 左クリックで割り当てプリセットを起動 / 右クリックでメニュー";
+        // Windows標準のNotifyIconコンテキストメニューを右クリックで表示する。
         trayIcon.ContextMenuStrip = trayMenu;
         trayIcon.Visible = true;
-        trayIcon.DoubleClick += (_, _) => ShowSettingsWindow();
+
+        // シングルクリックはOSのダブルクリック判定時間だけ待ち、
+        // その間にダブルクリックが成立した場合はシングルクリック処理を取り消す。
+        trayClickTimer.Interval = Math.Max(1, SystemInformation.DoubleClickTime);
+        trayClickTimer.Tick += (_, _) =>
+        {
+            trayClickTimer.Stop();
+            if (string.Equals(settings.TrayClickMode, "Single", StringComparison.OrdinalIgnoreCase))
+                LaunchTrayAssignedPreset();
+        };
+
+        trayIcon.MouseClick += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left || string.IsNullOrWhiteSpace(settings.TrayClickPreset)) return;
+            if (Environment.TickCount64 <= ignoreLeftClickUntilTick) return;
+            trayClickTimer.Stop();
+            trayClickTimer.Start();
+        };
+        trayIcon.MouseDoubleClick += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left || string.IsNullOrWhiteSpace(settings.TrayClickPreset)) return;
+            trayClickTimer.Stop();
+            // MouseDoubleClickの後にMouseClickが通知される環境でも二重実行しない。
+            ignoreLeftClickUntilTick = Environment.TickCount64 + SystemInformation.DoubleClickTime;
+            if (string.Equals(settings.TrayClickMode, "Double", StringComparison.OrdinalIgnoreCase))
+                LaunchTrayAssignedPreset();
+        };
     }
 
     private void RebuildTrayPresetItems()
@@ -76,9 +111,7 @@ internal sealed class MainForm : Form
         while (trayMenu.Items.Count > 2)
             trayMenu.Items.RemoveAt(2);
 
-        var presets = EnumeratePresets()
-            .OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase)
-            .ToList();
+        var presets = OrderPresets(EnumeratePresets()).ToList();
 
         if (presets.Count == 0)
         {
@@ -144,22 +177,51 @@ internal sealed class MainForm : Form
 
     private void BuildHome()
     {
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(8) };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(8) };
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         homePanel.Controls.Add(layout);
         var heading = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         heading.Controls.Add(new Label { Text = "ModMan", AutoSize = true, Font = new Font("Yu Gothic UI", 20F, FontStyle.Bold) });
-        heading.Controls.Add(new Label { Text = "使用するプリセットを選択して、ワンボタンで設定を適用・起動できます。", AutoSize = true });
+        heading.Controls.Add(new Label
+        {
+            Text = "SWRSToys.iniを変更して天則を再起動します\nSokuModLoaderのModLoaderSettings.jsonにも対応",
+            AutoSize = true
+        });
         layout.Controls.Add(heading, 0, 0);
         homePresetPanel.Padding = new Padding(4, 14, 4, 14);
         layout.Controls.Add(homePresetPanel, 0, 1);
+
+        var quickLaunch = new GroupBox { Text = "タスクトレイの左クリックに割り当てるプリセット", Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(10) };
+        var quickRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
+        quickRow.Controls.Add(new Label { Text = "プリセット：", AutoSize = true, Padding = new Padding(0, 6, 0, 0) });
+        quickRow.Controls.Add(trayPresetBox);
+        quickRow.Controls.Add(new Label { Text = "実行タイミング：", AutoSize = true, Padding = new Padding(8, 6, 0, 0) });
+        trayClickModeBox.Items.AddRange(new object[] { "シングルクリック", "ダブルクリック" });
+        quickRow.Controls.Add(trayClickModeBox);
+        quickLaunch.Controls.Add(quickRow);
+        layout.Controls.Add(quickLaunch, 0, 2);
+
+        trayPresetBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (loadingTrayQuickSettings) return;
+            settings.TrayClickPreset = trayPresetBox.SelectedIndex <= 0 ? "" : trayPresetBox.SelectedItem?.ToString() ?? "";
+            SaveSettings();
+        };
+        trayClickModeBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (loadingTrayQuickSettings) return;
+            settings.TrayClickMode = trayClickModeBox.SelectedIndex == 1 ? "Double" : "Single";
+            SaveSettings();
+        };
+
         var footer = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft };
         var settingsButton = new Button { Text = "プリセット設定", AutoSize = true, Padding = new Padding(14, 7, 14, 7) };
         settingsButton.Click += (_, _) => ShowEditor();
         footer.Controls.Add(settingsButton);
-        layout.Controls.Add(footer, 0, 2);
+        layout.Controls.Add(footer, 0, 3);
     }
 
     private void BuildEditor()
@@ -182,27 +244,32 @@ internal sealed class MainForm : Form
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.Controls.Add(body, 0, 1);
 
-        var left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
+        var left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
         left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.Controls.Add(new Label { Text = "登録済みプリセット", AutoSize = true, Font = new Font(Font, FontStyle.Bold) }, 0, 0);
         presetList.Dock = DockStyle.Fill;
         presetList.SelectedIndexChanged += (_, _) => LoadSelectedPreset();
         left.Controls.Add(presetList, 0, 1);
+        var orderButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
+        AddButton(orderButtons, "上へ", () => MoveSelectedPreset(-1));
+        AddButton(orderButtons, "下へ", () => MoveSelectedPreset(1));
+        left.Controls.Add(orderButtons, 0, 2);
         var typeRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
         typeRow.Controls.Add(new Label { Text = "形式：", AutoSize = true, Padding = new Padding(0, 6, 0, 0) });
         typeBox.Items.AddRange(new object[] { "JSON (ModLoaderSettings.json)", "SWRSToys.ini" });
         typeBox.SelectedIndex = 0;
         typeBox.SelectedIndexChanged += (_, _) => { currentPreset = null; moduleList.Items.Clear(); RefreshEditorPresets(); };
         typeRow.Controls.Add(typeBox);
-        left.Controls.Add(typeRow, 0, 2);
+        left.Controls.Add(typeRow, 0, 3);
         var presetButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
         AddButton(presetButtons, "新規作成", CreatePreset);
         AddButton(presetButtons, "名前変更", RenamePreset);
         AddButton(presetButtons, "削除", DeletePreset);
-        left.Controls.Add(presetButtons, 0, 3);
+        left.Controls.Add(presetButtons, 0, 4);
         body.Controls.Add(left, 0, 0);
 
         var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(14, 0, 0, 0) };
@@ -261,7 +328,11 @@ internal sealed class MainForm : Form
         try
         {
             if (File.Exists(settingsPath))
-                settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(settingsPath)) ?? new AppSettings();
+                settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(settingsPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSettings();
+            settings.PresetOrder ??= new List<string>();
+            settings.TrayClickPreset ??= "";
+            if (!string.Equals(settings.TrayClickMode, "Double", StringComparison.OrdinalIgnoreCase))
+                settings.TrayClickMode = "Single";
             if (string.IsNullOrWhiteSpace(settings.GameDirectory))
                 settings.GameDirectory = Directory.GetParent(managerDir)?.FullName ?? managerDir;
             gameDirBox.Text = settings.GameDirectory;
@@ -288,7 +359,8 @@ internal sealed class MainForm : Form
     {
         homePresetPanel.Controls.Clear();
         Directory.CreateDirectory(presetRoot);
-        var presets = EnumeratePresets().OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
+        var presets = OrderPresets(EnumeratePresets()).ToList();
+        RefreshTrayQuickLaunchControls(presets);
         if (presets.Count == 0)
         {
             homePresetPanel.Controls.Add(new Label { Text = "プリセットがありません。\n「プリセット設定」から新規作成してください。", AutoSize = true, Padding = new Padding(8) });
@@ -309,6 +381,35 @@ internal sealed class MainForm : Form
         }
     }
 
+    private void RefreshTrayQuickLaunchControls(IEnumerable<PresetInfo>? source = null)
+    {
+        var presets = OrderPresets(source ?? EnumeratePresets()).ToList();
+        loadingTrayQuickSettings = true;
+        try
+        {
+            trayPresetBox.BeginUpdate();
+            trayPresetBox.Items.Clear();
+            trayPresetBox.Items.Add("（割り当てなし）");
+            foreach (var preset in presets) trayPresetBox.Items.Add(preset.Name);
+
+            int selectedIndex = 0;
+            if (!string.IsNullOrWhiteSpace(settings.TrayClickPreset))
+            {
+                int found = trayPresetBox.Items.IndexOf(settings.TrayClickPreset);
+                if (found >= 0) selectedIndex = found;
+                else settings.TrayClickPreset = "";
+            }
+            trayPresetBox.SelectedIndex = selectedIndex;
+            trayClickModeBox.SelectedIndex = string.Equals(settings.TrayClickMode, "Double", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        }
+        finally
+        {
+            trayPresetBox.EndUpdate();
+            loadingTrayQuickSettings = false;
+        }
+        SaveSettings();
+    }
+
     private IEnumerable<PresetInfo> EnumeratePresets()
     {
         if (!Directory.Exists(presetRoot)) yield break;
@@ -325,13 +426,56 @@ internal sealed class MainForm : Form
     {
         string? selected = currentPreset?.Name;
         presetList.Items.Clear();
-        foreach (var preset in EnumeratePresets().Where(p => p.Type == SelectedType).OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase))
+        foreach (var preset in OrderPresets(EnumeratePresets().Where(p => p.Type == SelectedType)))
             presetList.Items.Add(preset.Name);
         if (selected != null)
         {
             int index = presetList.Items.IndexOf(selected);
             if (index >= 0) presetList.SelectedIndex = index;
         }
+    }
+
+    private IEnumerable<PresetInfo> OrderPresets(IEnumerable<PresetInfo> source)
+    {
+        var items = source.ToList();
+        var rank = settings.PresetOrder
+            .Select((name, index) => (name, index))
+            .ToDictionary(x => x.name, x => x.index, StringComparer.OrdinalIgnoreCase);
+        return items.OrderBy(p => rank.TryGetValue(p.Name, out int index) ? index : int.MaxValue)
+                    .ThenBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase);
+    }
+
+    private void MoveSelectedPreset(int direction)
+    {
+        if (presetList.SelectedItem is not string selectedName) return;
+        var names = presetList.Items.Cast<string>().ToList();
+        int oldIndex = names.FindIndex(n => n.Equals(selectedName, StringComparison.OrdinalIgnoreCase));
+        int newIndex = oldIndex + direction;
+        if (oldIndex < 0 || newIndex < 0 || newIndex >= names.Count) return;
+
+        (names[oldIndex], names[newIndex]) = (names[newIndex], names[oldIndex]);
+        var allNames = EnumeratePresets().Select(p => p.Name).ToList();
+        var reorderedVisible = names;
+        // Keep other-format presets in their existing relative order, while storing a global order.
+        var visibleSet = new HashSet<string>(reorderedVisible, StringComparer.OrdinalIgnoreCase);
+        var merged = new List<string>();
+        int visibleIndex = 0;
+        foreach (var name in OrderNamesAcrossTypes(allNames))
+            merged.Add(visibleSet.Contains(name) ? reorderedVisible[visibleIndex++] : name);
+        settings.PresetOrder = merged.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        SaveSettings();
+        RefreshEditorPresets();
+        presetList.SelectedItem = selectedName;
+        RefreshHomePresets();
+        SetStatus("プリセットの表示順を保存しました。");
+    }
+
+    private IEnumerable<string> OrderNamesAcrossTypes(IEnumerable<string> names)
+    {
+        var rank = settings.PresetOrder.Select((name, index) => (name, index))
+            .ToDictionary(x => x.name, x => x.index, StringComparer.OrdinalIgnoreCase);
+        return names.OrderBy(n => rank.TryGetValue(n, out int index) ? index : int.MaxValue)
+                    .ThenBy(n => n, StringComparer.CurrentCultureIgnoreCase);
     }
 
     private void CreatePreset()
@@ -351,6 +495,8 @@ internal sealed class MainForm : Form
                 return;
             }
             Directory.CreateDirectory(destinationDir);
+            if (!settings.PresetOrder.Contains(name, StringComparer.OrdinalIgnoreCase)) settings.PresetOrder.Add(name);
+            SaveSettings();
             string destination = Path.Combine(destinationDir, TargetFileName(SelectedType));
             File.Copy(source, destination);
             currentPreset = new PresetInfo(name, SelectedType, destination);
@@ -379,6 +525,12 @@ internal sealed class MainForm : Form
                 return;
             }
             Directory.Move(oldDir, newDir);
+            settings.PresetOrder = settings.PresetOrder
+                .Select(n => n.Equals(oldName, StringComparison.OrdinalIgnoreCase) ? newName : n)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (settings.TrayClickPreset.Equals(oldName, StringComparison.OrdinalIgnoreCase))
+                settings.TrayClickPreset = newName;
+            SaveSettings();
             currentPreset = new PresetInfo(newName, SelectedType, Path.Combine(newDir, TargetFileName(SelectedType)));
             RefreshEditorPresets();
             presetList.SelectedItem = newName;
@@ -472,6 +624,10 @@ internal sealed class MainForm : Form
         try
         {
             Directory.Delete(Path.Combine(presetRoot, name), true);
+            settings.PresetOrder.RemoveAll(n => n.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (settings.TrayClickPreset.Equals(name, StringComparison.OrdinalIgnoreCase))
+                settings.TrayClickPreset = "";
+            SaveSettings();
             currentPreset = null;
             moduleList.Items.Clear();
             RefreshEditorPresets();
@@ -479,6 +635,21 @@ internal sealed class MainForm : Form
             SetStatus($"'{name}' を削除しました。");
         }
         catch (Exception ex) { ShowError(ex); }
+    }
+
+    private void LaunchTrayAssignedPreset()
+    {
+        if (launchInProgress) return;
+        if (string.IsNullOrWhiteSpace(settings.TrayClickPreset)) return;
+
+        var preset = EnumeratePresets().FirstOrDefault(p =>
+            p.Name.Equals(settings.TrayClickPreset, StringComparison.OrdinalIgnoreCase));
+        if (preset == null)
+        {
+            MessageBox.Show("割り当てられたプリセットが見つかりません。設定ウィンドウで選び直してください。", "ModMan");
+            return;
+        }
+        ApplyAndLaunch(preset);
     }
 
     private void ApplySelectedPresetFromEditor()
@@ -489,6 +660,8 @@ internal sealed class MainForm : Form
 
     private async void ApplyAndLaunch(PresetInfo preset)
     {
+        if (launchInProgress) return;
+        launchInProgress = true;
         try
         {
             SaveSettings();
@@ -515,6 +688,7 @@ internal sealed class MainForm : Form
             SetStatus($"'{preset.Name}' を適用してゲームを起動しました。");
         }
         catch (Exception ex) { ShowError(ex); }
+        finally { launchInProgress = false; }
     }
 
     private static async Task StopGameProcesses()
