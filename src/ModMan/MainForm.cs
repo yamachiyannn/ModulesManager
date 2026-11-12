@@ -387,8 +387,8 @@ internal sealed class MainForm : Form
         loadingTrayQuickSettings = true;
         try
         {
-            FillQuickPresetCombo(traySinglePresetBox, presets, ref settings.TraySingleClickPreset);
-            FillQuickPresetCombo(trayDoublePresetBox, presets, ref settings.TrayDoubleClickPreset);
+            settings.TraySingleClickPreset = FillQuickPresetCombo(traySinglePresetBox, presets, settings.TraySingleClickPreset);
+            settings.TrayDoubleClickPreset = FillQuickPresetCombo(trayDoublePresetBox, presets, settings.TrayDoubleClickPreset);
         }
         finally
         {
@@ -397,7 +397,7 @@ internal sealed class MainForm : Form
         SaveSettings();
     }
 
-    private void FillQuickPresetCombo(ComboBox combo, IEnumerable<PresetInfo> presets, ref string selectedPreset)
+    private string FillQuickPresetCombo(ComboBox combo, IEnumerable<PresetInfo> presets, string selectedPreset)
     {
         combo.BeginUpdate();
         try
@@ -413,6 +413,7 @@ internal sealed class MainForm : Form
                 else selectedPreset = "";
             }
             combo.SelectedIndex = selectedIndex;
+            return selectedPreset;
         }
         finally { combo.EndUpdate(); }
     }
