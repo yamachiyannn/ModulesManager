@@ -16,8 +16,8 @@ internal sealed class MainForm : Form
     private readonly ListBox presetList = new() { IntegralHeight = false };
     private readonly CheckedListBox moduleList = new() { CheckOnClick = true, IntegralHeight = false };
     private readonly FlowLayoutPanel homePresetPanel = new() { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-    private readonly ComboBox trayPresetBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
-    private readonly ComboBox trayClickModeBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+    private readonly ComboBox traySinglePresetBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
+    private readonly ComboBox trayDoublePresetBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
     private readonly Label statusLabel = new() { AutoSize = true, ForeColor = Color.DimGray };
     private readonly Panel homePanel = new() { Dock = DockStyle.Fill };
     private readonly Panel editorPanel = new() { Dock = DockStyle.Fill, Visible = false };
@@ -83,25 +83,23 @@ internal sealed class MainForm : Form
         trayClickTimer.Tick += (_, _) =>
         {
             trayClickTimer.Stop();
-            if (string.Equals(settings.TrayClickMode, "Single", StringComparison.OrdinalIgnoreCase))
-                LaunchTrayAssignedPreset();
+            LaunchTrayAssignedPreset(settings.TraySingleClickPreset);
         };
 
         trayIcon.MouseClick += (_, e) =>
         {
-            if (e.Button != MouseButtons.Left || string.IsNullOrWhiteSpace(settings.TrayClickPreset)) return;
+            if (e.Button != MouseButtons.Left || string.IsNullOrWhiteSpace(settings.TraySingleClickPreset)) return;
             if (Environment.TickCount64 <= ignoreLeftClickUntilTick) return;
             trayClickTimer.Stop();
             trayClickTimer.Start();
         };
         trayIcon.MouseDoubleClick += (_, e) =>
         {
-            if (e.Button != MouseButtons.Left || string.IsNullOrWhiteSpace(settings.TrayClickPreset)) return;
+            if (e.Button != MouseButtons.Left || string.IsNullOrWhiteSpace(settings.TrayDoubleClickPreset)) return;
             trayClickTimer.Stop();
             // MouseDoubleClickの後にMouseClickが通知される環境でも二重実行しない。
             ignoreLeftClickUntilTick = Environment.TickCount64 + SystemInformation.DoubleClickTime;
-            if (string.Equals(settings.TrayClickMode, "Double", StringComparison.OrdinalIgnoreCase))
-                LaunchTrayAssignedPreset();
+            LaunchTrayAssignedPreset(settings.TrayDoubleClickPreset);
         };
     }
 
@@ -195,25 +193,28 @@ internal sealed class MainForm : Form
         layout.Controls.Add(homePresetPanel, 0, 1);
 
         var quickLaunch = new GroupBox { Text = "タスクトレイの左クリックに割り当てるプリセット", Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(10) };
-        var quickRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
-        quickRow.Controls.Add(new Label { Text = "プリセット：", AutoSize = true, Padding = new Padding(0, 6, 0, 0) });
-        quickRow.Controls.Add(trayPresetBox);
-        quickRow.Controls.Add(new Label { Text = "実行タイミング：", AutoSize = true, Padding = new Padding(8, 6, 0, 0) });
-        trayClickModeBox.Items.AddRange(new object[] { "シングルクリック", "ダブルクリック" });
-        quickRow.Controls.Add(trayClickModeBox);
+        var quickRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        var singleRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        singleRow.Controls.Add(new Label { Text = "シングルクリック：", AutoSize = true, Padding = new Padding(0, 6, 0, 0), Width = 145 });
+        singleRow.Controls.Add(traySinglePresetBox);
+        var doubleRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        doubleRow.Controls.Add(new Label { Text = "ダブルクリック：", AutoSize = true, Padding = new Padding(0, 6, 0, 0), Width = 145 });
+        doubleRow.Controls.Add(trayDoublePresetBox);
+        quickRow.Controls.Add(singleRow);
+        quickRow.Controls.Add(doubleRow);
         quickLaunch.Controls.Add(quickRow);
         layout.Controls.Add(quickLaunch, 0, 2);
 
-        trayPresetBox.SelectedIndexChanged += (_, _) =>
+        traySinglePresetBox.SelectedIndexChanged += (_, _) =>
         {
             if (loadingTrayQuickSettings) return;
-            settings.TrayClickPreset = trayPresetBox.SelectedIndex <= 0 ? "" : trayPresetBox.SelectedItem?.ToString() ?? "";
+            settings.TraySingleClickPreset = traySinglePresetBox.SelectedIndex <= 0 ? "" : traySinglePresetBox.SelectedItem?.ToString() ?? "";
             SaveSettings();
         };
-        trayClickModeBox.SelectedIndexChanged += (_, _) =>
+        trayDoublePresetBox.SelectedIndexChanged += (_, _) =>
         {
             if (loadingTrayQuickSettings) return;
-            settings.TrayClickMode = trayClickModeBox.SelectedIndex == 1 ? "Double" : "Single";
+            settings.TrayDoubleClickPreset = trayDoublePresetBox.SelectedIndex <= 0 ? "" : trayDoublePresetBox.SelectedItem?.ToString() ?? "";
             SaveSettings();
         };
 
@@ -330,9 +331,8 @@ internal sealed class MainForm : Form
             if (File.Exists(settingsPath))
                 settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(settingsPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSettings();
             settings.PresetOrder ??= new List<string>();
-            settings.TrayClickPreset ??= "";
-            if (!string.Equals(settings.TrayClickMode, "Double", StringComparison.OrdinalIgnoreCase))
-                settings.TrayClickMode = "Single";
+            settings.TraySingleClickPreset ??= "";
+            settings.TrayDoubleClickPreset ??= "";
             if (string.IsNullOrWhiteSpace(settings.GameDirectory))
                 settings.GameDirectory = Directory.GetParent(managerDir)?.FullName ?? managerDir;
             gameDirBox.Text = settings.GameDirectory;
@@ -387,27 +387,34 @@ internal sealed class MainForm : Form
         loadingTrayQuickSettings = true;
         try
         {
-            trayPresetBox.BeginUpdate();
-            trayPresetBox.Items.Clear();
-            trayPresetBox.Items.Add("（割り当てなし）");
-            foreach (var preset in presets) trayPresetBox.Items.Add(preset.Name);
-
-            int selectedIndex = 0;
-            if (!string.IsNullOrWhiteSpace(settings.TrayClickPreset))
-            {
-                int found = trayPresetBox.Items.IndexOf(settings.TrayClickPreset);
-                if (found >= 0) selectedIndex = found;
-                else settings.TrayClickPreset = "";
-            }
-            trayPresetBox.SelectedIndex = selectedIndex;
-            trayClickModeBox.SelectedIndex = string.Equals(settings.TrayClickMode, "Double", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+            FillQuickPresetCombo(traySinglePresetBox, presets, ref settings.TraySingleClickPreset);
+            FillQuickPresetCombo(trayDoublePresetBox, presets, ref settings.TrayDoubleClickPreset);
         }
         finally
         {
-            trayPresetBox.EndUpdate();
             loadingTrayQuickSettings = false;
         }
         SaveSettings();
+    }
+
+    private void FillQuickPresetCombo(ComboBox combo, IEnumerable<PresetInfo> presets, ref string selectedPreset)
+    {
+        combo.BeginUpdate();
+        try
+        {
+            combo.Items.Clear();
+            combo.Items.Add("（割り当てなし）");
+            foreach (var preset in presets) combo.Items.Add(preset.Name);
+            int selectedIndex = 0;
+            if (!string.IsNullOrWhiteSpace(selectedPreset))
+            {
+                int found = combo.Items.IndexOf(selectedPreset);
+                if (found >= 0) selectedIndex = found;
+                else selectedPreset = "";
+            }
+            combo.SelectedIndex = selectedIndex;
+        }
+        finally { combo.EndUpdate(); }
     }
 
     private IEnumerable<PresetInfo> EnumeratePresets()
@@ -528,8 +535,10 @@ internal sealed class MainForm : Form
             settings.PresetOrder = settings.PresetOrder
                 .Select(n => n.Equals(oldName, StringComparison.OrdinalIgnoreCase) ? newName : n)
                 .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            if (settings.TrayClickPreset.Equals(oldName, StringComparison.OrdinalIgnoreCase))
-                settings.TrayClickPreset = newName;
+            if (settings.TraySingleClickPreset.Equals(oldName, StringComparison.OrdinalIgnoreCase))
+                settings.TraySingleClickPreset = newName;
+            if (settings.TrayDoubleClickPreset.Equals(oldName, StringComparison.OrdinalIgnoreCase))
+                settings.TrayDoubleClickPreset = newName;
             SaveSettings();
             currentPreset = new PresetInfo(newName, SelectedType, Path.Combine(newDir, TargetFileName(SelectedType)));
             RefreshEditorPresets();
@@ -625,8 +634,10 @@ internal sealed class MainForm : Form
         {
             Directory.Delete(Path.Combine(presetRoot, name), true);
             settings.PresetOrder.RemoveAll(n => n.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (settings.TrayClickPreset.Equals(name, StringComparison.OrdinalIgnoreCase))
-                settings.TrayClickPreset = "";
+            if (settings.TraySingleClickPreset.Equals(name, StringComparison.OrdinalIgnoreCase))
+                settings.TraySingleClickPreset = "";
+            if (settings.TrayDoubleClickPreset.Equals(name, StringComparison.OrdinalIgnoreCase))
+                settings.TrayDoubleClickPreset = "";
             SaveSettings();
             currentPreset = null;
             moduleList.Items.Clear();
@@ -637,13 +648,13 @@ internal sealed class MainForm : Form
         catch (Exception ex) { ShowError(ex); }
     }
 
-    private void LaunchTrayAssignedPreset()
+    private void LaunchTrayAssignedPreset(string presetName)
     {
         if (launchInProgress) return;
-        if (string.IsNullOrWhiteSpace(settings.TrayClickPreset)) return;
+        if (string.IsNullOrWhiteSpace(presetName)) return;
 
         var preset = EnumeratePresets().FirstOrDefault(p =>
-            p.Name.Equals(settings.TrayClickPreset, StringComparison.OrdinalIgnoreCase));
+            p.Name.Equals(presetName, StringComparison.OrdinalIgnoreCase));
         if (preset == null)
         {
             MessageBox.Show("割り当てられたプリセットが見つかりません。設定ウィンドウで選び直してください。", "ModMan");

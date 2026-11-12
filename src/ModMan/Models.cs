@@ -11,9 +11,9 @@ internal sealed class AppSettings
     public string SelectedPreset { get; set; } = "";
     public bool BackupEnabled { get; set; } = true;
     public List<string> PresetOrder { get; set; } = new();
-    public string TrayClickPreset { get; set; } = "";
-    // "Single" or "Double". A single click is delayed until Windows' double-click interval has elapsed.
-    public string TrayClickMode { get; set; } = "Single";
+    // Independent quick-launch assignments for left single-click and left double-click.
+    public string TraySingleClickPreset { get; set; } = "";
+    public string TrayDoubleClickPreset { get; set; } = "";
 }
 
 internal sealed record ModuleEntry(string Key, string DisplayName, bool Enabled);
