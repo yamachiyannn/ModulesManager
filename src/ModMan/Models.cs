@@ -14,6 +14,8 @@ internal sealed class AppSettings
     // Independent quick-launch assignments for left single-click and left double-click.
     public string TraySingleClickPreset { get; set; } = "";
     public string TrayDoubleClickPreset { get; set; } = "";
+    public string SelectedFormat { get; set; } = "Json";
+    public List<string> ExeQuickLaunchPaths { get; set; } = new() { "", "", "" };
 }
 
 internal sealed record ModuleEntry(string Key, string DisplayName, bool Enabled);

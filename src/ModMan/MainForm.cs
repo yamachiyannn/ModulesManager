@@ -18,6 +18,7 @@ internal sealed class MainForm : Form
     private readonly FlowLayoutPanel homePresetPanel = new() { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
     private readonly ComboBox traySinglePresetBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
     private readonly ComboBox trayDoublePresetBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
+    private readonly TextBox[] exeQuickBoxes = Enumerable.Range(0, 3).Select(_ => new TextBox { Width = 390 }).ToArray();
     private readonly Label statusLabel = new() { AutoSize = true, ForeColor = Color.DimGray };
     private readonly Panel homePanel = new() { Dock = DockStyle.Fill };
     private readonly Panel editorPanel = new() { Dock = DockStyle.Fill, Visible = false };
@@ -26,6 +27,7 @@ internal sealed class MainForm : Form
     private bool loading;
     private bool allowExit;
     private bool loadingTrayQuickSettings;
+    private bool loadingSettings;
     private bool launchInProgress;
     private long ignoreLeftClickUntilTick;
     private readonly NotifyIcon trayIcon = new();
@@ -95,11 +97,12 @@ internal sealed class MainForm : Form
         };
         trayIcon.MouseDoubleClick += (_, e) =>
         {
-            if (e.Button != MouseButtons.Left || string.IsNullOrWhiteSpace(settings.TrayDoubleClickPreset)) return;
+            if (e.Button != MouseButtons.Left) return;
+            // ダブルクリックが成立したら、割り当ての有無にかかわらずシングル側を必ず取り消す。
             trayClickTimer.Stop();
-            // MouseDoubleClickの後にMouseClickが通知される環境でも二重実行しない。
             ignoreLeftClickUntilTick = Environment.TickCount64 + SystemInformation.DoubleClickTime;
-            LaunchTrayAssignedPreset(settings.TrayDoubleClickPreset);
+            if (!string.IsNullOrWhiteSpace(settings.TrayDoubleClickPreset))
+                LaunchTrayAssignedPreset(settings.TrayDoubleClickPreset);
         };
     }
 
@@ -109,7 +112,9 @@ internal sealed class MainForm : Form
         while (trayMenu.Items.Count > 2)
             trayMenu.Items.RemoveAt(2);
 
-        var presets = OrderPresets(EnumeratePresets()).ToList();
+        var presets = OrderNamesAcrossTypes(EnumeratePresetNames())
+            .Select(name => new PresetInfo(name, SelectedType, Path.Combine(presetRoot, name, TargetFileName(SelectedType))))
+            .Where(p => File.Exists(p.FilePath)).ToList();
 
         if (presets.Count == 0)
         {
@@ -175,19 +180,15 @@ internal sealed class MainForm : Form
 
     private void BuildHome()
     {
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(8) };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(8) };
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         homePanel.Controls.Add(layout);
         var heading = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         heading.Controls.Add(new Label { Text = "ModMan", AutoSize = true, Font = new Font("Yu Gothic UI", 20F, FontStyle.Bold) });
-        heading.Controls.Add(new Label
-        {
-            Text = "SWRSToys.iniを変更して天則を再起動します\nSokuModLoaderのModLoaderSettings.jsonにも対応",
-            AutoSize = true
-        });
         layout.Controls.Add(heading, 0, 0);
         homePresetPanel.Padding = new Padding(4, 14, 4, 14);
         layout.Controls.Add(homePresetPanel, 0, 1);
@@ -200,10 +201,39 @@ internal sealed class MainForm : Form
         var doubleRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
         doubleRow.Controls.Add(new Label { Text = "ダブルクリック：", AutoSize = true, Padding = new Padding(0, 6, 0, 0), Width = 145 });
         doubleRow.Controls.Add(trayDoublePresetBox);
+        var formatRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        formatRow.Controls.Add(new Label { Text = "設定形式：", AutoSize = true, Padding = new Padding(0, 6, 0, 0) });
+        typeBox.Items.AddRange(new object[] { "JSON (ModLoaderSettings.json)", "SWRSToys.ini" });
+        typeBox.SelectedIndexChanged += (_, _) =>
+        {
+            settings.SelectedFormat = SelectedType.ToString();
+            if (!loadingSettings) SaveSettings();
+            currentPreset = null;
+            RefreshHomePresets();
+            if (editorPanel.Visible) RefreshEditorPresets();
+        };
+        formatRow.Controls.Add(typeBox);
+        quickRow.Controls.Add(formatRow);
         quickRow.Controls.Add(singleRow);
         quickRow.Controls.Add(doubleRow);
         quickLaunch.Controls.Add(quickRow);
         layout.Controls.Add(quickLaunch, 0, 2);
+
+        var exeQuickGroup = new GroupBox { Text = "EXEクイック起動（フォルダを指定すると th4_5888\\tsk.exe を起動）", Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(8) };
+        var exeQuickRows = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        for (int i = 0; i < exeQuickBoxes.Length; i++)
+        {
+            int slot = i;
+            var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+            exeQuickBoxes[i].Width = 390;
+            row.Controls.Add(exeQuickBoxes[i]);
+            var run = new Button { Text = "起動", AutoSize = true };
+            run.Click += (_, _) => LaunchQuickExe(slot);
+            row.Controls.Add(run);
+            exeQuickRows.Controls.Add(row);
+        }
+        exeQuickGroup.Controls.Add(exeQuickRows);
+        layout.Controls.Add(exeQuickGroup, 0, 3);
 
         traySinglePresetBox.SelectedIndexChanged += (_, _) =>
         {
@@ -222,7 +252,7 @@ internal sealed class MainForm : Form
         var settingsButton = new Button { Text = "プリセット設定", AutoSize = true, Padding = new Padding(14, 7, 14, 7) };
         settingsButton.Click += (_, _) => ShowEditor();
         footer.Controls.Add(settingsButton);
-        layout.Controls.Add(footer, 0, 3);
+        layout.Controls.Add(footer, 0, 4);
     }
 
     private void BuildEditor()
@@ -245,10 +275,9 @@ internal sealed class MainForm : Form
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.Controls.Add(body, 0, 1);
 
-        var left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
+        var left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
         left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.Controls.Add(new Label { Text = "登録済みプリセット", AutoSize = true, Font = new Font(Font, FontStyle.Bold) }, 0, 0);
@@ -259,18 +288,11 @@ internal sealed class MainForm : Form
         AddButton(orderButtons, "上へ", () => MoveSelectedPreset(-1));
         AddButton(orderButtons, "下へ", () => MoveSelectedPreset(1));
         left.Controls.Add(orderButtons, 0, 2);
-        var typeRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
-        typeRow.Controls.Add(new Label { Text = "形式：", AutoSize = true, Padding = new Padding(0, 6, 0, 0) });
-        typeBox.Items.AddRange(new object[] { "JSON (ModLoaderSettings.json)", "SWRSToys.ini" });
-        typeBox.SelectedIndex = 0;
-        typeBox.SelectedIndexChanged += (_, _) => { currentPreset = null; moduleList.Items.Clear(); RefreshEditorPresets(); };
-        typeRow.Controls.Add(typeBox);
-        left.Controls.Add(typeRow, 0, 3);
         var presetButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
         AddButton(presetButtons, "新規作成", CreatePreset);
         AddButton(presetButtons, "名前変更", RenamePreset);
         AddButton(presetButtons, "削除", DeletePreset);
-        left.Controls.Add(presetButtons, 0, 4);
+        left.Controls.Add(presetButtons, 0, 3);
         body.Controls.Add(left, 0, 0);
 
         var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(14, 0, 0, 0) };
@@ -326,6 +348,7 @@ internal sealed class MainForm : Form
 
     private void LoadSettings()
     {
+        loadingSettings = true;
         try
         {
             if (File.Exists(settingsPath))
@@ -333,10 +356,19 @@ internal sealed class MainForm : Form
             settings.PresetOrder ??= new List<string>();
             settings.TraySingleClickPreset ??= "";
             settings.TrayDoubleClickPreset ??= "";
+            settings.SelectedFormat ??= "Json";
+            settings.ExeQuickLaunchPaths ??= new List<string>();
+            while (settings.ExeQuickLaunchPaths.Count < 3) settings.ExeQuickLaunchPaths.Add("");
+            settings.ExeQuickLaunchPaths = settings.ExeQuickLaunchPaths.Take(3).ToList();
             if (string.IsNullOrWhiteSpace(settings.GameDirectory))
                 settings.GameDirectory = Directory.GetParent(managerDir)?.FullName ?? managerDir;
+            else if (!Path.IsPathRooted(settings.GameDirectory))
+                settings.GameDirectory = Path.GetFullPath(Path.Combine(managerDir, settings.GameDirectory));
             gameDirBox.Text = settings.GameDirectory;
             exeBox.Text = settings.LaunchExe;
+            for (int i = 0; i < 3; i++)
+                exeQuickBoxes[i].Text = string.IsNullOrWhiteSpace(settings.ExeQuickLaunchPaths[i]) ? settings.GameDirectory : settings.ExeQuickLaunchPaths[i];
+            typeBox.SelectedIndex = settings.SelectedFormat.Equals("SwrsToysIni", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         }
         catch (Exception ex) { MessageBox.Show("設定ファイルを読み込めませんでした。\n" + ex.Message, "ModMan"); }
     }
@@ -345,6 +377,8 @@ internal sealed class MainForm : Form
     {
         settings.GameDirectory = gameDirBox.Text.Trim();
         settings.LaunchExe = string.IsNullOrWhiteSpace(exeBox.Text) ? "th123.exe" : exeBox.Text.Trim();
+        settings.SelectedFormat = SelectedType.ToString();
+        settings.ExeQuickLaunchPaths = exeQuickBoxes.Select(b => b.Text.Trim()).ToList();
         Directory.CreateDirectory(managerDir);
         File.WriteAllText(settingsPath, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
     }
@@ -359,22 +393,25 @@ internal sealed class MainForm : Form
     {
         homePresetPanel.Controls.Clear();
         Directory.CreateDirectory(presetRoot);
-        var presets = OrderPresets(EnumeratePresets()).ToList();
-        RefreshTrayQuickLaunchControls(presets);
-        if (presets.Count == 0)
+        var names = OrderNamesAcrossTypes(EnumeratePresetNames()).ToList();
+        RefreshTrayQuickLaunchControls();
+        if (names.Count == 0)
         {
-            homePresetPanel.Controls.Add(new Label { Text = "プリセットがありません。\n「プリセット設定」から新規作成してください。", AutoSize = true, Padding = new Padding(8) });
+            homePresetPanel.Controls.Add(new Label { Text = "プリセットがありません。\\n「プリセット設定」から新規作成してください。", AutoSize = true, Padding = new Padding(8) });
             return;
         }
-        foreach (var preset in presets)
+        foreach (var name in names)
         {
+            string file = Path.Combine(presetRoot, name, TargetFileName(SelectedType));
+            bool available = File.Exists(file);
             var button = new Button
             {
-                Text = $"▶  {preset.Name}     ({(preset.Type == PresetType.Json ? "JSON" : "SWRSToys.ini")})",
+                Text = $"▶  {name}" + (available ? "" : "   （この形式の設定は未作成）"),
                 Width = Math.Max(500, homePresetPanel.ClientSize.Width - 35), Height = 58,
                 TextAlign = ContentAlignment.MiddleLeft, Font = new Font(Font, FontStyle.Bold),
                 Padding = new Padding(14, 0, 0, 0), Margin = new Padding(4, 5, 4, 5),
-                Tag = preset
+                Tag = new PresetInfo(name, SelectedType, file),
+                Enabled = available
             };
             button.Click += (_, _) => ApplyAndLaunch((PresetInfo)button.Tag!);
             homePresetPanel.Controls.Add(button);
@@ -383,7 +420,7 @@ internal sealed class MainForm : Form
 
     private void RefreshTrayQuickLaunchControls(IEnumerable<PresetInfo>? source = null)
     {
-        var presets = OrderPresets(source ?? EnumeratePresets()).ToList();
+        var presets = OrderNamesAcrossTypes(EnumeratePresetNames()).Select(n => new PresetInfo(n, SelectedType, Path.Combine(presetRoot, n, TargetFileName(SelectedType)))).ToList();
         loadingTrayQuickSettings = true;
         try
         {
@@ -418,24 +455,35 @@ internal sealed class MainForm : Form
         finally { combo.EndUpdate(); }
     }
 
-    private IEnumerable<PresetInfo> EnumeratePresets()
+    private IEnumerable<string> EnumeratePresetNames()
     {
         if (!Directory.Exists(presetRoot)) yield break;
         foreach (var dir in Directory.GetDirectories(presetRoot))
         {
-            string json = Path.Combine(dir, settings.JsonFileName);
-            string ini = Path.Combine(dir, settings.IniFileName);
-            if (File.Exists(json)) yield return new PresetInfo(Path.GetFileName(dir), PresetType.Json, json);
-            else if (File.Exists(ini)) yield return new PresetInfo(Path.GetFileName(dir), PresetType.SwrsToysIni, ini);
+            string name = Path.GetFileName(dir);
+            if (File.Exists(Path.Combine(dir, settings.JsonFileName)) || File.Exists(Path.Combine(dir, settings.IniFileName)))
+                yield return name;
+        }
+    }
+
+    private IEnumerable<PresetInfo> EnumeratePresets()
+    {
+        foreach (var name in EnumeratePresetNames())
+        {
+            foreach (var type in new[] { PresetType.Json, PresetType.SwrsToysIni })
+            {
+                string path = Path.Combine(presetRoot, name, TargetFileName(type));
+                if (File.Exists(path)) yield return new PresetInfo(name, type, path);
+            }
         }
     }
 
     private void RefreshEditorPresets()
     {
-        string? selected = currentPreset?.Name;
+        string? selected = currentPreset?.Name ?? settings.SelectedPreset;
         presetList.Items.Clear();
-        foreach (var preset in OrderPresets(EnumeratePresets().Where(p => p.Type == SelectedType)))
-            presetList.Items.Add(preset.Name);
+        foreach (var name in OrderNamesAcrossTypes(EnumeratePresetNames()))
+            presetList.Items.Add(name);
         if (selected != null)
         {
             int index = presetList.Items.IndexOf(selected);
@@ -448,7 +496,8 @@ internal sealed class MainForm : Form
         var items = source.ToList();
         var rank = settings.PresetOrder
             .Select((name, index) => (name, index))
-            .ToDictionary(x => x.name, x => x.index, StringComparer.OrdinalIgnoreCase);
+            .GroupBy(x => x.name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().index, StringComparer.OrdinalIgnoreCase);
         return items.OrderBy(p => rank.TryGetValue(p.Name, out int index) ? index : int.MaxValue)
                     .ThenBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase);
     }
@@ -462,7 +511,7 @@ internal sealed class MainForm : Form
         if (oldIndex < 0 || newIndex < 0 || newIndex >= names.Count) return;
 
         (names[oldIndex], names[newIndex]) = (names[newIndex], names[oldIndex]);
-        var allNames = EnumeratePresets().Select(p => p.Name).ToList();
+        var allNames = EnumeratePresetNames().ToList();
         var reorderedVisible = names;
         // Keep other-format presets in their existing relative order, while storing a global order.
         var visibleSet = new HashSet<string>(reorderedVisible, StringComparer.OrdinalIgnoreCase);
@@ -481,7 +530,8 @@ internal sealed class MainForm : Form
     private IEnumerable<string> OrderNamesAcrossTypes(IEnumerable<string> names)
     {
         var rank = settings.PresetOrder.Select((name, index) => (name, index))
-            .ToDictionary(x => x.name, x => x.index, StringComparer.OrdinalIgnoreCase);
+            .GroupBy(x => x.name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().index, StringComparer.OrdinalIgnoreCase);
         return names.OrderBy(n => rank.TryGetValue(n, out int index) ? index : int.MaxValue)
                     .ThenBy(n => n, StringComparer.CurrentCultureIgnoreCase);
     }
@@ -497,15 +547,15 @@ internal sealed class MainForm : Form
             if (string.IsNullOrWhiteSpace(input)) return;
             string name = SanitizeName(input);
             string destinationDir = Path.Combine(presetRoot, name);
-            if (Directory.Exists(destinationDir) || EnumeratePresets().Any(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            string destination = Path.Combine(destinationDir, TargetFileName(SelectedType));
+            if (File.Exists(destination))
             {
-                MessageBox.Show($"同じ名前のプリセット「{name}」が既に存在します。別の名前を指定してください。", "名前の重複", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show($"プリセット「{name}」には、この形式の設定が既にあります。", "重複", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             Directory.CreateDirectory(destinationDir);
             if (!settings.PresetOrder.Contains(name, StringComparer.OrdinalIgnoreCase)) settings.PresetOrder.Add(name);
             SaveSettings();
-            string destination = Path.Combine(destinationDir, TargetFileName(SelectedType));
             File.Copy(source, destination);
             currentPreset = new PresetInfo(name, SelectedType, destination);
             RefreshEditorPresets();
@@ -541,10 +591,12 @@ internal sealed class MainForm : Form
             if (settings.TrayDoubleClickPreset.Equals(oldName, StringComparison.OrdinalIgnoreCase))
                 settings.TrayDoubleClickPreset = newName;
             SaveSettings();
-            currentPreset = new PresetInfo(newName, SelectedType, Path.Combine(newDir, TargetFileName(SelectedType)));
+            string renamedFile = Path.Combine(newDir, TargetFileName(SelectedType));
+            currentPreset = File.Exists(renamedFile) ? new PresetInfo(newName, SelectedType, renamedFile) : null;
             RefreshEditorPresets();
             presetList.SelectedItem = newName;
-            LoadPreset(currentPreset);
+            if (currentPreset != null) LoadPreset(currentPreset);
+            else moduleList.Items.Clear();
             RefreshHomePresets();
             SetStatus($"'{oldName}' を '{newName}' に変更しました。");
         }
@@ -575,7 +627,13 @@ internal sealed class MainForm : Form
     {
         if (loading || presetList.SelectedItem is not string name) return;
         string path = Path.Combine(presetRoot, name, TargetFileName(SelectedType));
-        if (!File.Exists(path)) return;
+        if (!File.Exists(path))
+        {
+            currentPreset = null;
+            moduleList.Items.Clear();
+            SetStatus($"「{name}」には現在選択中の形式の設定がありません。");
+            return;
+        }
         currentPreset = new PresetInfo(name, SelectedType, path);
         settings.SelectedPreset = name;
         LoadPreset(currentPreset);
@@ -654,14 +712,43 @@ internal sealed class MainForm : Form
         if (launchInProgress) return;
         if (string.IsNullOrWhiteSpace(presetName)) return;
 
-        var preset = EnumeratePresets().FirstOrDefault(p =>
-            p.Name.Equals(presetName, StringComparison.OrdinalIgnoreCase));
+        string presetPath = Path.Combine(presetRoot, presetName, TargetFileName(SelectedType));
+        var preset = File.Exists(presetPath) ? new PresetInfo(presetName, SelectedType, presetPath) : null;
         if (preset == null)
         {
             MessageBox.Show("割り当てられたプリセットが見つかりません。設定ウィンドウで選び直してください。", "ModMan");
             return;
         }
         ApplyAndLaunch(preset);
+    }
+
+    private void LaunchQuickExe(int slot)
+    {
+        try
+        {
+            SaveSettings();
+            string configured = exeQuickBoxes[slot].Text.Trim();
+            if (string.IsNullOrWhiteSpace(configured))
+                throw new InvalidOperationException($"クイック起動 {slot + 1} のパスが空欄です。");
+            string path = Environment.ExpandEnvironmentVariables(configured.Trim('"'));
+            string executable;
+            string workingDirectory;
+            if (Directory.Exists(path))
+            {
+                executable = Path.Combine(path, "th4_5888", "tsk.exe");
+                workingDirectory = Path.GetDirectoryName(executable)!;
+            }
+            else
+            {
+                executable = Path.GetFullPath(path);
+                workingDirectory = Path.GetDirectoryName(executable) ?? managerDir;
+            }
+            if (!File.Exists(executable))
+                throw new FileNotFoundException("指定された実行ファイルが見つかりません。\\nフォルダを指定した場合は th4_5888\\tsk.exe を探します。", executable);
+            Process.Start(new ProcessStartInfo { FileName = executable, WorkingDirectory = workingDirectory, UseShellExecute = true });
+            SetStatus($"クイック起動 {slot + 1} を実行しました。");
+        }
+        catch (Exception ex) { ShowError(ex); }
     }
 
     private void ApplySelectedPresetFromEditor()

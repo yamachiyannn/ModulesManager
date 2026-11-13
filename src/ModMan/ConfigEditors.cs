@@ -43,10 +43,10 @@ internal static class ConfigEditors
         WriteUtf8(destinationPath, root.ToJsonString(JsonOptions));
     }
 
-    // SWRSToys: module entry "Name=path.dll" is enabled; "; Name=path.dll" is disabled.
-    // Other comments (including # comments), section headers, spacing and unrelated lines are preserved.
+    // Supports both "Name=path.dll" and plain "path.dll" module rows.
+    // A leading semicolon disables a row. Other comments/sections are untouched.
     private static readonly Regex IniModuleLine =
-        new(@"^(?<indent>\s*)(?<comment>;+\s*)?(?<key>[A-Za-z0-9_.+\-]+)\s*=\s*(?<value>[^;#]+?\\?\.dll)\s*(?<tail>;.*)?$",
+        new(@"^(?<indent>\s*)(?<comment>;+\s*)?(?<body>(?:[A-Za-z0-9_.+\-]+\s*=\s*)?[^;#\s][^;#]*?\.dll)(?<tail>\s*;.*)?$",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static List<ModuleEntry> ReadIniModules(string path)
@@ -54,6 +54,7 @@ internal static class ConfigEditors
         var lines = File.ReadAllLines(path, Encoding.UTF8);
         bool inModule = false;
         var result = new List<ModuleEntry>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var line in lines)
         {
             var trimmed = line.Trim();
@@ -65,10 +66,11 @@ internal static class ConfigEditors
             if (!inModule) continue;
             var match = IniModuleLine.Match(line);
             if (!match.Success) continue;
-            var key = match.Groups["key"].Value;
-            var value = match.Groups["value"].Value.Trim();
-            var identity = key + "=" + value;
-            var display = key;
+            string identity = match.Groups["body"].Value.Trim();
+            if (!seen.Add(identity)) continue;
+            string display = identity.Contains('=')
+                ? identity[..identity.IndexOf('=')].Trim()
+                : Path.GetFileNameWithoutExtension(identity.Replace('\\', '/'));
             result.Add(new ModuleEntry(identity, display, !match.Groups["comment"].Success));
         }
         return result;
@@ -76,6 +78,7 @@ internal static class ConfigEditors
 
     public static void SaveIniWithStates(string sourcePath, string destinationPath, IReadOnlyDictionary<string, bool> states)
     {
+        var original = File.ReadAllText(sourcePath, Encoding.UTF8);
         var lines = File.ReadAllLines(sourcePath, Encoding.UTF8).ToList();
         bool inModule = false;
         for (int i = 0; i < lines.Count; i++)
@@ -90,17 +93,21 @@ internal static class ConfigEditors
             var match = IniModuleLine.Match(lines[i]);
             if (!match.Success) continue;
 
-            string key = match.Groups["key"].Value;
-            string value = match.Groups["value"].Value.Trim();
-            string identity = key + "=" + value;
+            string identity = match.Groups["body"].Value.Trim();
             if (!states.TryGetValue(identity, out bool enabled)) continue;
 
             string indent = match.Groups["indent"].Value;
+            string body = match.Groups["body"].Value;
             string tail = match.Groups["tail"].Value;
-            string assignment = key + "=" + value;
-            lines[i] = enabled ? indent + assignment + tail : indent + "; " + assignment + tail;
+            lines[i] = enabled ? indent + body + tail : indent + "; " + body + tail;
         }
-        WriteUtf8(destinationPath, string.Join(Environment.NewLine, lines) + Environment.NewLine);
+
+        string newline = original.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" :
+            original.Contains('\r') ? "\r" : "\n";
+        bool hadFinalNewline = original.EndsWith("\n", StringComparison.Ordinal) || original.EndsWith("\r", StringComparison.Ordinal);
+        string output = string.Join(newline, lines);
+        if (hadFinalNewline && lines.Count > 0) output += newline;
+        WriteUtf8(destinationPath, output);
     }
 
     public static void WriteUtf8(string path, string content)
