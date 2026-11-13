@@ -45,6 +45,7 @@ internal sealed class MainForm : Form
         Font = new Font("Yu Gothic UI", 9F);
         BuildUi();
         LoadSettings();
+        EnsurePresetFormatPairs();
         RefreshHomePresets();
         ShowHome();
         InitializeTrayIcon();
@@ -193,7 +194,7 @@ internal sealed class MainForm : Form
         homePresetPanel.Padding = new Padding(4, 14, 4, 14);
         layout.Controls.Add(homePresetPanel, 0, 1);
 
-        var quickLaunch = new GroupBox { Text = "タスクトレイの左クリックに割り当てるプリセット", Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(10) };
+        var quickLaunch = new GroupBox { Text = "基本設定", Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(10) };
         var quickRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         var singleRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
         singleRow.Controls.Add(new Label { Text = "シングルクリック：", AutoSize = true, Padding = new Padding(0, 6, 0, 0), Width = 145 });
@@ -219,7 +220,7 @@ internal sealed class MainForm : Form
         quickLaunch.Controls.Add(quickRow);
         layout.Controls.Add(quickLaunch, 0, 2);
 
-        var exeQuickGroup = new GroupBox { Text = "EXEクイック起動（フォルダを指定すると th4_5888\\tsk.exe を起動）", Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(8) };
+        var exeQuickGroup = new GroupBox { Text = "ファイル実行（天則観など）", Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(8) };
         var exeQuickRows = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         for (int i = 0; i < exeQuickBoxes.Length; i++)
         {
@@ -387,6 +388,36 @@ internal sealed class MainForm : Form
     {
         using var dialog = new FolderBrowserDialog { SelectedPath = gameDirBox.Text };
         if (dialog.ShowDialog(this) == DialogResult.OK) gameDirBox.Text = dialog.SelectedPath;
+    }
+
+    private void EnsurePresetFormatPairs()
+    {
+        if (!Directory.Exists(presetRoot)) return;
+        string jsonTemplate = SourceFile(PresetType.Json);
+        string iniTemplate = SourceFile(PresetType.SwrsToysIni);
+        var warnings = new List<string>();
+        foreach (string directory in Directory.GetDirectories(presetRoot))
+        {
+            string jsonPreset = Path.Combine(directory, TargetFileName(PresetType.Json));
+            string iniPreset = Path.Combine(directory, TargetFileName(PresetType.SwrsToysIni));
+            bool hasJson = File.Exists(jsonPreset);
+            bool hasIni = File.Exists(iniPreset);
+            if (hasJson == hasIni) continue;
+            try
+            {
+                if (hasJson && File.Exists(iniTemplate))
+                    ConfigEditors.CreateCompanionPreset(jsonPreset, PresetType.Json, iniTemplate, PresetType.SwrsToysIni, iniPreset);
+                else if (hasIni && File.Exists(jsonTemplate))
+                    ConfigEditors.CreateCompanionPreset(iniPreset, PresetType.SwrsToysIni, jsonTemplate, PresetType.Json, jsonPreset);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"{Path.GetFileName(directory)}: {ex.Message}");
+            }
+        }
+        if (warnings.Count > 0)
+            MessageBox.Show("一部のプリセットで別形式の自動作成をスキップしました。既存ファイルは変更していません。\n\n" + string.Join("\n", warnings),
+                "プリセット形式の補完", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     private void RefreshHomePresets()

@@ -110,6 +110,72 @@ internal static class ConfigEditors
         WriteUtf8(destinationPath, output);
     }
 
+
+    // Creates the missing-format companion from the current game configuration.
+    // Matching modules inherit only their enabled/disabled state; unmatched modules
+    // retain the state already present in the destination-format template.
+    public static int CreateCompanionPreset(string sourcePresetPath, PresetType sourceType,
+        string targetTemplatePath, PresetType targetType, string destinationPath)
+    {
+        var sourceModules = sourceType == PresetType.Json
+            ? ReadJsonModules(sourcePresetPath)
+            : ReadIniModules(sourcePresetPath);
+        var targetModules = targetType == PresetType.Json
+            ? ReadJsonModules(targetTemplatePath)
+            : ReadIniModules(targetTemplatePath);
+
+        var sourceStates = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (var module in sourceModules)
+            foreach (var identity in ComparableNames(module))
+                sourceStates[identity] = module.Enabled;
+
+        var targetStates = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        int matched = 0;
+        foreach (var module in targetModules)
+        {
+            bool? inherited = null;
+            foreach (var identity in ComparableNames(module))
+            {
+                if (sourceStates.TryGetValue(identity, out bool enabled))
+                {
+                    inherited = enabled;
+                    break;
+                }
+            }
+            targetStates[module.Key] = inherited ?? module.Enabled;
+            if (inherited.HasValue) matched++;
+        }
+
+        string? directory = Path.GetDirectoryName(destinationPath);
+        if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+        string temporary = destinationPath + ".creating";
+        try
+        {
+            File.Copy(targetTemplatePath, temporary, true);
+            if (targetType == PresetType.Json)
+                SaveJsonWithStates(temporary, destinationPath, targetStates);
+            else
+                SaveIniWithStates(temporary, destinationPath, targetStates);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+        return matched;
+    }
+
+    private static IEnumerable<string> ComparableNames(ModuleEntry module)
+    {
+        string key = module.Key.Trim();
+        int equals = key.IndexOf('=');
+        if (equals >= 0) key = key[(equals + 1)..].Trim();
+        key = key.TrimStart(';').Trim().Replace('\\', '/');
+        string fileName = Path.GetFileNameWithoutExtension(key);
+        if (!string.IsNullOrWhiteSpace(fileName)) yield return fileName;
+        string display = module.DisplayName.Trim();
+        if (!string.IsNullOrWhiteSpace(display)) yield return display;
+    }
+
     public static void WriteUtf8(string path, string content)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
